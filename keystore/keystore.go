@@ -42,8 +42,10 @@ func SetToken(token string) error {
 		return err
 	}
 	return ring.Set(keyring.Item{
-		Key:  tokenKey,
-		Data: []byte(token),
+		Key:         tokenKey,
+		Label:       "Growatt API Token",
+		Description: "Growatt API Token",
+		Data:        []byte(token),
 	})
 }
 

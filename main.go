@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/NimbleMarkets/ntcharts/canvas/runes"
@@ -346,7 +351,18 @@ func runServe(baseURL, token string, args []string) {
 		os.Exit(1)
 	}
 
-	if err := srv.Start(); err != nil {
+	// Graceful shutdown on SIGINT/SIGTERM
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		s := <-sig
+		fmt.Fprintf(os.Stderr, "\nShutting down (signal: %v)...\n", s)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	}()
+
+	if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
 	}

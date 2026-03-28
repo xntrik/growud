@@ -1,8 +1,11 @@
 package tray
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -35,6 +38,11 @@ type TrayApp struct {
 	dbPath      string
 	readingsDir string
 	cacheDir    string
+
+	// Shutdown coordination
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	srv    *server.Server
 }
 
 // NewTrayApp creates a new menu bar application.
@@ -67,34 +75,45 @@ func (t *TrayApp) SetConfig(baseURL, token, configEnv, dbPath, readingsDir, cach
 func (t *TrayApp) Run() {
 	log.Printf("TrayApp.Run() called")
 
+	ctx, cancel := context.WithCancel(context.Background())
+	t.cancel = cancel
+
 	// Configure menuet
 	menuet.App().Label = "com.github.xntrik.growud"
 	menuet.App().Children = t.menuItems
 	menuet.App().HideStartup()
 
-	// Register graceful shutdown handler so we log before menuet's Quit terminates the app
-	wg, ctx := menuet.App().GracefulShutdownHandles()
-	wg.Add(1)
+	// Register graceful shutdown handler so we clean up before menuet's Quit terminates the app
+	menuWg, menuCtx := menuet.App().GracefulShutdownHandles()
+	menuWg.Add(1)
 	go func() {
-		defer wg.Done()
-		<-ctx.Done()
-		log.Printf("Growud shutting down")
+		defer menuWg.Done()
+		<-menuCtx.Done()
+		t.shutdown()
 	}()
 
 	log.Printf("Setting initial title")
 	t.setTitle("Growud")
 
-	// Log on SIGINT/SIGTERM
+	// Shut down cleanly on SIGINT/SIGTERM
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		s := <-sig
-		log.Printf("Growud shutting down (signal: %v)", s)
-		os.Exit(0)
+		select {
+		case s := <-sig:
+			log.Printf("Growud shutting down (signal: %v)", s)
+			signal.Stop(sig)
+			t.shutdown()
+			os.Exit(0)
+		case <-ctx.Done():
+			signal.Stop(sig)
+		}
 	}()
 
 	// Initialize in background after event loop starts
+	t.wg.Add(1)
 	go func() {
+		defer t.wg.Done()
 		log.Printf("Init goroutine started, waiting for event loop...")
 		// Small delay to let the event loop start
 		time.Sleep(1 * time.Second)
@@ -107,30 +126,59 @@ func (t *TrayApp) Run() {
 		}
 
 		// Start HTTP server
-		go func() {
-			srv, err := server.NewServer(t.client, t.store, t.bind, t.port)
-			if err != nil {
-				log.Printf("Error creating server: %v", err)
-				return
-			}
-			log.Printf("Starting web server on %s:%d", t.bind, t.port)
-			if err := srv.Start(); err != nil {
-				log.Printf("Server error: %v", err)
-			}
-		}()
+		srv, err := server.NewServer(t.client, t.store, t.bind, t.port)
+		if err != nil {
+			log.Printf("Error creating server: %v", err)
+		} else {
+			t.srv = srv
+			t.wg.Add(1)
+			go func() {
+				defer t.wg.Done()
+				log.Printf("Starting web server on %s:%d", t.bind, t.port)
+				if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					log.Printf("Server error: %v", err)
+				}
+			}()
+		}
 
 		// Initial fetch and collect
 		t.refresh()
 		t.collect()
 
 		// Start refresh loop
-		go t.refreshLoop()
+		t.wg.Add(1)
+		go t.refreshLoop(ctx)
 	}()
 
 	// Run the app (blocks)
 	log.Printf("Calling menuet.App().RunApplication()")
 	menuet.App().RunApplication()
 	log.Printf("RunApplication() returned (unexpected)")
+}
+
+// shutdown cancels all background goroutines and cleans up resources.
+func (t *TrayApp) shutdown() {
+	log.Printf("Growud shutting down")
+	t.cancel()
+
+	// Shut down HTTP server
+	if t.srv != nil {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutCancel()
+		if err := t.srv.Shutdown(shutCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+	}
+
+	// Close the store
+	if t.store != nil {
+		if err := t.store.Close(); err != nil {
+			log.Printf("Store close error: %v", err)
+		}
+	}
+
+	// Wait for goroutines to finish
+	t.wg.Wait()
 }
 
 func (t *TrayApp) initialize() error {
@@ -166,12 +214,18 @@ func (t *TrayApp) initialize() error {
 	return nil
 }
 
-func (t *TrayApp) refreshLoop() {
+func (t *TrayApp) refreshLoop(ctx context.Context) {
+	defer t.wg.Done()
 	ticker := time.NewTicker(time.Duration(t.refreshMins) * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		t.refresh()
-		t.collect()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.refresh()
+			t.collect()
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -24,6 +25,7 @@ type Server struct {
 	bind   string
 	port   int
 	tmpl   *template.Template
+	srv    *http.Server
 }
 
 // NewServer creates a new dashboard server.
@@ -52,7 +54,7 @@ func (s *Server) Start() error {
 	addr := fmt.Sprintf("%s:%d", s.bind, s.port)
 	fmt.Printf("Growud server listening on http://%s\n", addr)
 
-	srv := &http.Server{
+	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -60,7 +62,15 @@ func (s *Server) Start() error {
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	return srv.ListenAndServe()
+	return s.srv.ListenAndServe()
+}
+
+// Shutdown gracefully shuts down the server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.srv == nil {
+		return nil
+	}
+	return s.srv.Shutdown(ctx)
 }
 
 type dashboardData struct {

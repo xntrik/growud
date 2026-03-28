@@ -38,6 +38,11 @@ const dashboardHTML = `<!DOCTYPE html>
         }
         .chart-container { position: relative; height: 400px; }
 
+        .energy-estimates { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px 0 0; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 12px; }
+        .energy-estimates .est-item { font-size: 0.85rem; color: #aaa; }
+        .energy-estimates .est-value { font-weight: 600; margin-left: 4px; }
+        .energy-estimates .est-label { font-size: 0.75rem; color: #666; font-style: italic; margin-left: 8px; }
+
         .footer { margin-top: 16px; text-align: center; color: #555; font-size: 0.8rem; }
         .cache-info { color: #666; font-size: 0.8rem; margin-top: 4px; }
 
@@ -85,6 +90,7 @@ const dashboardHTML = `<!DOCTYPE html>
             <div class="chart-container">
                 <canvas id="chart"></canvas>
             </div>
+            <div class="energy-estimates" id="energy-estimates"></div>
         </div>
 
         <div class="footer">Growud &mdash; Growatt Solar Monitor</div>
@@ -101,6 +107,31 @@ const dashboardHTML = `<!DOCTYPE html>
     };
 
     let chart = null;
+
+    function updateEstimates() {
+        if (!chart) return;
+        const xScale = chart.scales.x;
+        const minT = xScale.min;
+        const maxT = xScale.max;
+        const el = document.getElementById('energy-estimates');
+        const names = ['Solar PV', 'Load', 'Discharge', 'Charge', 'Grid Import', 'Grid Export'];
+        const colors = [chartColors.solar, chartColors.load, chartColors.discharge, chartColors.charge, chartColors.gridIn, chartColors.gridOut];
+        let html = '';
+        chart.data.datasets.forEach(function(ds, i) {
+            const pts = ds.data.filter(function(p) {
+                var t = new Date(p.x).getTime();
+                return t >= minT && t <= maxT;
+            });
+            var kwh = 0;
+            for (var j = 1; j < pts.length; j++) {
+                var dt = (new Date(pts[j].x).getTime() - new Date(pts[j-1].x).getTime()) / 3600000;
+                kwh += (pts[j-1].y + pts[j].y) / 2 * dt / 1000;
+            }
+            html += '<span class="est-item"><span style="color:' + colors[i] + '">' + names[i] + ':</span><span class="est-value" style="color:' + colors[i] + '">~' + kwh.toFixed(2) + ' kWh</span></span>';
+        });
+        html += '<span class="est-label">estimated via trapezoidal integration</span>';
+        el.innerHTML = html;
+    }
 
     function metric(label, value, unit) {
         return '<div class="metric"><span class="label">' + label + '</span><span class="value">' + value + (unit || '') + '</span></div>';
@@ -174,6 +205,7 @@ const dashboardHTML = `<!DOCTYPE html>
             if (chart) {
                 chart.data.datasets = datasets;
                 chart.update();
+                updateEstimates();
             } else {
                 const ctx = document.getElementById('chart').getContext('2d');
                 chart = new Chart(ctx, {
@@ -196,11 +228,13 @@ const dashboardHTML = `<!DOCTYPE html>
                                         borderWidth: 1,
                                     },
                                     mode: 'x',
+                                    onZoomComplete: function() { updateEstimates(); },
                                 },
                                 pan: {
                                     enabled: true,
                                     mode: 'x',
                                     threshold: 5,
+                                    onPanComplete: function() { updateEstimates(); },
                                 },
                             },
                             legend: {
@@ -237,6 +271,7 @@ const dashboardHTML = `<!DOCTYPE html>
                         }
                     }
                 });
+                updateEstimates();
             }
         } catch (err) {
             console.error('Failed to load chart:', err);
@@ -248,7 +283,7 @@ const dashboardHTML = `<!DOCTYPE html>
     });
 
     document.getElementById('reset-zoom').addEventListener('click', function() {
-        if (chart) chart.resetZoom();
+        if (chart) { chart.resetZoom(); updateEstimates(); }
     });
 
     loadSummary();
