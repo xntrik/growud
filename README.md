@@ -1,5 +1,7 @@
 # Growud
 
+![Growud](growud.png)
+
 A monitoring and data collection tool for **Growatt** hybrid solar inverters. Provides a CLI, web dashboard, and native macOS menu bar app for tracking solar generation, battery state, load consumption, and grid interaction.
 
 ## Supported Devices
