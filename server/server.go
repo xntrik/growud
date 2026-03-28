@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"regexp"
 	"time"
@@ -173,7 +174,8 @@ func (s *Server) handleAPISummary(w http.ResponseWriter, r *http.Request) {
 
 	plantList, err := s.client.ListPlants()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("Error listing plants: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list plants"})
 		return
 	}
 
@@ -290,7 +292,8 @@ func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
 
 	points, err := s.store.QueryDayReadings(deviceSN, date)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("Error querying readings for %s on %s: %v", deviceSN, date, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to query readings"})
 		return
 	}
 

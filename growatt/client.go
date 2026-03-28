@@ -103,7 +103,9 @@ func (c *Client) doRequest(req *http.Request) (json.RawMessage, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit response body to 10 MB to prevent OOM from a malicious upstream.
+	const maxResponseSize = 10 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
