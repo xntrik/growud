@@ -1,0 +1,6 @@
+.env
+.cache/
+*.db
+growud
+Growud.app/
+.claude/
