@@ -20,5 +20,7 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>growud</string>
 </dict>
 </plist>

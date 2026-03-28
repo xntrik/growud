@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -12,6 +13,9 @@ import (
 
 	"github.com/xntrik/growud/growatt"
 )
+
+//go:embed logo.png
+var logoPNG []byte
 
 var (
 	dateRe     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
@@ -48,6 +52,7 @@ func NewServer(client *growatt.Client, store *growatt.Store, bind string, port i
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleDashboard)
+	mux.HandleFunc("/favicon.png", handleFavicon)
 	mux.HandleFunc("/api/summary", s.handleAPISummary)
 	mux.HandleFunc("/api/readings", s.handleAPIReadings)
 
@@ -326,6 +331,12 @@ func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(logoPNG)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

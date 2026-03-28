@@ -19,6 +19,7 @@ build-app: ## Build macOS .app bundle
 	mkdir -p Growud.app/Contents/Resources
 	CGO_ENABLED=1 go build -o Growud.app/Contents/MacOS/growud .
 	cp Info.plist Growud.app/Contents/
+	cp growud.icns Growud.app/Contents/Resources/
 
 install: build-app ## Install .app to /Applications
 	cp -r Growud.app /Applications/
