@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/xntrik/growud/growatt"
+)
+
+var (
+	dateRe     = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	deviceSNRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
 // Server handles the HTTP dashboard.
@@ -65,6 +71,10 @@ type dashboardData struct {
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -150,6 +160,11 @@ type summaryCache struct {
 }
 
 func (s *Server) handleAPISummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	s.client.ResetCacheStats()
 
 	resp := summaryResponse{
@@ -244,9 +259,20 @@ type readingPoint struct {
 }
 
 func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	date := r.URL.Query().Get("date")
 	if date == "" {
 		date = time.Now().Format("2006-01-02")
+	} else if !dateRe.MatchString(date) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid date format, expected YYYY-MM-DD"})
+		return
+	} else if _, err := time.Parse("2006-01-02", date); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid date value"})
+		return
 	}
 
 	deviceSN := r.URL.Query().Get("device")
@@ -257,6 +283,9 @@ func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		deviceSN = sns[0]
+	} else if !deviceSNRe.MatchString(deviceSN) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device serial number"})
+		return
 	}
 
 	points, err := s.store.QueryDayReadings(deviceSN, date)

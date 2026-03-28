@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -73,6 +74,96 @@ func TestHandleDashboard_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleDashboard_MethodNotAllowed(t *testing.T) {
+	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	req := httptest.NewRequest("POST", "/", nil)
+	w := httptest.NewRecorder()
+	srv.handleDashboard(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+func TestHandleAPISummary_MethodNotAllowed(t *testing.T) {
+	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	req := httptest.NewRequest("POST", "/api/summary", nil)
+	w := httptest.NewRecorder()
+	srv.handleAPISummary(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+func TestHandleAPIReadings_MethodNotAllowed(t *testing.T) {
+	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	req := httptest.NewRequest("DELETE", "/api/readings", nil)
+	w := httptest.NewRecorder()
+	srv.handleAPIReadings(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", w.Code)
+	}
+}
+
+func TestHandleAPIReadings_InvalidDate(t *testing.T) {
+	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	tests := []struct {
+		name string
+		date string
+	}{
+		{"bad format", "not-a-date"},
+		{"SQL injection", "2026-01-01' OR 1=1--"},
+		{"partial date", "2026-03"},
+		{"invalid calendar date", "2026-13-45"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := "/api/readings?date=" + url.QueryEscape(tt.date)
+			req := httptest.NewRequest("GET", u, nil)
+			w := httptest.NewRecorder()
+			srv.handleAPIReadings(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 for date %q", w.Code, tt.date)
+			}
+		})
+	}
+}
+
+func TestHandleAPIReadings_InvalidDevice(t *testing.T) {
+	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	tests := []struct {
+		name   string
+		device string
+	}{
+		{"spaces", "SN 001"},
+		{"SQL injection", "SN001'; DROP TABLE readings;--"},
+		{"special chars", "SN<script>alert(1)</script>"},
+		{"too long", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := "/api/readings?date=2026-03-27&device=" + url.QueryEscape(tt.device)
+			req := httptest.NewRequest("GET", u, nil)
+			w := httptest.NewRecorder()
+			srv.handleAPIReadings(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 for device %q", w.Code, tt.device)
+			}
+		})
 	}
 }
 

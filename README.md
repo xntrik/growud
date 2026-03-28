@@ -25,12 +25,15 @@ A monitoring and data collection tool for **Growatt** hybrid solar inverters. Pr
 ## Quick Start
 
 ```bash
-# Set your Growatt API token (or put it in a .env file)
-export GROWATT_TOKEN=your_token_here
-
-# Build and run
+# Build
 make build
+
+# Option 1: Set your token via environment variable
+export GROWATT_TOKEN=your_token_here
 ./growud
+
+# Option 2: Launch the tray app — it will prompt and save to macOS Keychain
+./growud tray
 ```
 
 ## Usage
@@ -69,11 +72,20 @@ make build
 
 ## Configuration
 
-Configuration is loaded from environment variables, which can be set in a `.env` file in the working directory.
+### API Token
+
+The Growatt API token is resolved in this order:
+
+1. **Environment variable** `GROWATT_TOKEN` (including via `.env` file) — useful for CI/scripts
+2. **macOS Keychain** — the tray app saves here automatically on first launch
+
+### Environment Variables
+
+Non-secret configuration is loaded from environment variables, which can be set in a `.env` file in the working directory.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GROWATT_TOKEN` | API authentication token | *(required)* |
+| `GROWATT_TOKEN` | API token override (takes precedence over keychain) | |
 | `GROWATT_BASE_URL` | Growatt API endpoint | `https://openapi-au.growatt.com/v1/` |
 | `GROWATT_VERBOSE` | Enable verbose output | `0` |
 | `GROWUD_BIND` | Address to bind the web server to | `127.0.0.1` |

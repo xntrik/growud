@@ -6,13 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/caseymrm/menuet"
 	"github.com/xntrik/growud/growatt"
+	"github.com/xntrik/growud/keystore"
 	"github.com/xntrik/growud/server"
 )
 
@@ -139,7 +139,7 @@ func (t *TrayApp) initialize() error {
 	// Prompt for token if missing
 	if token == "" {
 		log.Printf("No token found, prompting user")
-		token = PromptForToken(t.configEnv)
+		token = PromptForToken()
 		if token == "" {
 			return fmt.Errorf("no token provided")
 		}
@@ -385,8 +385,8 @@ func menuSeparator() menuet.MenuItem {
 }
 
 // PromptForToken shows a macOS dialog asking for the Growatt API token
-// and saves it to the given config file path. Returns the token string.
-func PromptForToken(configPath string) string {
+// and saves it to the OS keychain. Returns the token string.
+func PromptForToken() string {
 	response := menuet.App().Alert(menuet.Alert{
 		MessageText:     "Welcome to Growud",
 		InformativeText: "Enter your Growatt API token to get started.\nYou can find this in the ShinePhone app under Me > API Token.",
@@ -400,17 +400,12 @@ func PromptForToken(configPath string) string {
 
 	token := response.Inputs[0]
 
-	// Ensure parent directory exists
-	dir := filepath.Dir(configPath)
-	os.MkdirAll(dir, 0755)
-
-	// Write config file
-	content := fmt.Sprintf("GROWATT_TOKEN=%s\n", token)
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
-		log.Printf("Error saving config: %v", err)
+	// Save to OS keychain
+	if err := keystore.SetToken(token); err != nil {
+		log.Printf("Error saving token to keychain: %v", err)
 	}
 
-	// Set in current environment
+	// Set in current environment so the running process picks it up
 	os.Setenv("GROWATT_TOKEN", token)
 
 	return token

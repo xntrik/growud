@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/joho/godotenv"
 	"github.com/xntrik/growud/growatt"
+	"github.com/xntrik/growud/keystore"
 	"github.com/xntrik/growud/server"
 	"github.com/xntrik/growud/tray"
 )
@@ -50,7 +51,15 @@ func main() {
 	// Load env from resolved config path
 	_ = godotenv.Load(paths.ConfigEnv)
 
+	// Token resolution: env var first (covers .env file too), then OS keyring
 	token := os.Getenv("GROWATT_TOKEN")
+	if token == "" {
+		var err error
+		token, err = keystore.GetToken()
+		if err != nil {
+			log.Printf("Warning: keyring access failed: %v", err)
+		}
+	}
 	log.Printf("Token present: %v", token != "")
 
 	baseURL := os.Getenv("GROWATT_BASE_URL")
@@ -77,7 +86,7 @@ func main() {
 	// we defer the check so the tray can prompt for it
 	if token == "" && cmd != "tray" {
 		log.Printf("No token and not tray mode, exiting")
-		fmt.Fprintln(os.Stderr, "Error: GROWATT_TOKEN is not set. Add it to .env or export it.")
+		fmt.Fprintln(os.Stderr, "Error: GROWATT_TOKEN is not set. Export it as an environment variable or run the tray app to save it to the OS keychain.")
 		os.Exit(1)
 	}
 
