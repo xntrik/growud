@@ -29,6 +29,15 @@ const dashboardHTML = `<!DOCTYPE html>
         .battery .value { color: #c084fc; }
         .load .value { color: #f87171; }
         .grid .value { color: #fb923c; }
+        .cost .value { color: #facc15; }
+        .cost .window-detail { font-size: 0.8rem; color: #888; padding: 2px 0 2px 8px; display: flex; justify-content: space-between; }
+        .cost .window-detail .wd-val { color: #facc15; font-weight: 500; }
+
+        .cost-section { background: #16213e; border-radius: 10px; padding: 20px; border: 1px solid #1a1a4e; }
+        .cost-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
+        .cost-header h2 { font-size: 1.1rem; }
+        .cost-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .cost-controls label { font-size: 0.85rem; color: #888; display: flex; align-items: center; gap: 6px; }
 
         .chart-section { background: #16213e; border-radius: 10px; padding: 20px; border: 1px solid #1a1a4e; }
         .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
@@ -92,6 +101,19 @@ const dashboardHTML = `<!DOCTYPE html>
                 <canvas id="chart"></canvas>
             </div>
             <div class="energy-estimates" id="energy-estimates"></div>
+        </div>
+
+        <div class="cost-section cost" style="margin-top:24px;">
+            <div class="cost-header">
+                <h2>Cost</h2>
+                <div class="cost-controls">
+                    <label>From <input type="date" id="cost-from" value="{{.Today}}"></label>
+                    <label>To <input type="date" id="cost-to" value="{{.Today}}"></label>
+                    <label>Device <input type="text" id="cost-device" placeholder="default" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:6px 12px;font-size:0.9rem;width:140px;"></label>
+                    <button id="cost-fetch" style="background:#facc15;color:#1a1a2e;border:none;border-radius:6px;padding:6px 16px;font-size:0.9rem;cursor:pointer;font-weight:600;">Fetch</button>
+                </div>
+            </div>
+            <div id="cost-metrics">Loading...</div>
         </div>
 
         <div class="footer">Growud &mdash; Growatt Solar Monitor</div>
@@ -279,6 +301,67 @@ const dashboardHTML = `<!DOCTYPE html>
         }
     }
 
+    function formatCurrency(cents, currency) {
+        var sym = currency === 'AUD' ? '$' : currency + ' ';
+        var val = Math.abs(cents / 100);
+        return (cents < 0 ? '-' : '') + sym + val.toFixed(2);
+    }
+
+    function windowDetail(name, kwh, costCents, currency) {
+        return '<div class="window-detail"><span>' + name + '</span><span class="wd-val">' + Number(kwh).toFixed(2) + ' kWh / ' + formatCurrency(costCents, currency) + '</span></div>';
+    }
+
+    async function loadCost() {
+        var el = document.getElementById('cost-metrics');
+        var from = document.getElementById('cost-from').value;
+        var to = document.getElementById('cost-to').value;
+        var device = document.getElementById('cost-device').value.trim();
+        var url = '/api/cost?from=' + from + '&to=' + to;
+        if (device) url += '&device=' + encodeURIComponent(device);
+        try {
+            var resp = await fetch(url);
+            if (resp.status === 501) {
+                el.innerHTML = '<div class="metric"><span class="label" style="color:#666">No tariff configured</span></div>';
+                return;
+            }
+            var data = await resp.json();
+            if (data.error) {
+                el.innerHTML = '<div class="metric"><span class="label" style="color:#666">' + data.error + '</span></div>';
+                return;
+            }
+            var cur = data.currency || '';
+            var html = '';
+            if (data.device) html += metric('Device', data.device);
+            if (data.from !== data.to) html += metric('Range', data.from + ' to ' + data.to);
+            html += metric('Import Cost', round(data.import.total_kwh, 2) + ' kWh / ' + formatCurrency(data.import.total_cents, cur));
+            if (data.import.windows) {
+                for (var i = 0; i < data.import.windows.length; i++) {
+                    var w = data.import.windows[i];
+                    if (w.kwh > 0) html += windowDetail(w.name, w.kwh, w.cost_cents, cur);
+                }
+            }
+            html += metric('Export Credit', round(data.export.total_kwh, 2) + ' kWh / ' + formatCurrency(data.export.total_cents, cur));
+            if (data.export.windows) {
+                for (var i = 0; i < data.export.windows.length; i++) {
+                    var w = data.export.windows[i];
+                    if (w.kwh > 0) html += windowDetail(w.name, w.kwh, w.cost_cents, cur);
+                }
+            }
+            var netLabel = data.net_cents >= 0 ? 'Net Cost' : 'Net Credit';
+            var netDisplay = formatCurrency(Math.abs(data.net_cents), cur);
+            html += metric(netLabel, netDisplay);
+            html += '<div style="text-align:right;font-size:0.75rem;color:#666;font-style:italic;margin-top:8px;">calculated from meter counters where available</div>';
+            el.innerHTML = html;
+        } catch (err) {
+            console.error('Failed to load cost:', err);
+            el.innerHTML = '<div class="metric"><span class="label" style="color:#666">Cost unavailable</span></div>';
+        }
+    }
+
+    document.getElementById('cost-fetch').addEventListener('click', function() {
+        loadCost();
+    });
+
     document.getElementById('date-picker').addEventListener('change', function() {
         loadChart(this.value);
     });
@@ -289,6 +372,7 @@ const dashboardHTML = `<!DOCTYPE html>
 
     loadSummary();
     loadChart(document.getElementById('date-picker').value);
+    loadCost();
     </script>
 </body>
 </html>`
