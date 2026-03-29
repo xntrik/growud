@@ -17,6 +17,7 @@ import (
 	"github.com/xntrik/growud/growatt"
 	"github.com/xntrik/growud/keystore"
 	"github.com/xntrik/growud/server"
+	"github.com/xntrik/growud/tariff"
 )
 
 // TrayApp manages the menu bar application.
@@ -38,6 +39,7 @@ type TrayApp struct {
 	dbPath      string
 	readingsDir string
 	cacheDir    string
+	tariffPath  string
 
 	// Shutdown coordination
 	cancel context.CancelFunc
@@ -62,13 +64,14 @@ func NewTrayApp(client *growatt.Client, store *growatt.Store, bind string, port,
 // SetConfig stores configuration for deferred initialization.
 // When client/store are nil, Run() will initialize them after the event loop starts,
 // prompting for token if needed.
-func (t *TrayApp) SetConfig(baseURL, token, configEnv, dbPath, readingsDir, cacheDir string) {
+func (t *TrayApp) SetConfig(baseURL, token, configEnv, dbPath, readingsDir, cacheDir, tariffPath string) {
 	t.baseURL = baseURL
 	t.token = token
 	t.configEnv = configEnv
 	t.dbPath = dbPath
 	t.readingsDir = readingsDir
 	t.cacheDir = cacheDir
+	t.tariffPath = tariffPath
 }
 
 // Run starts the menu bar app. Blocks forever.
@@ -130,6 +133,14 @@ func (t *TrayApp) Run() {
 		if err != nil {
 			log.Printf("Error creating server: %v", err)
 		} else {
+			if t.tariffPath != "" {
+				if cfg, err := tariff.LoadConfig(t.tariffPath); err == nil {
+					srv.SetTariffConfig(cfg)
+					log.Printf("Tariff config loaded from %s", t.tariffPath)
+				} else {
+					log.Printf("Tariff config not loaded: %v", err)
+				}
+			}
 			t.srv = srv
 			t.wg.Add(1)
 			go func() {

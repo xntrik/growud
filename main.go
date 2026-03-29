@@ -428,7 +428,7 @@ func runTray(baseURL, token string, args []string) {
 	// Pass token/baseURL/configPath to TrayApp — it will handle
 	// the first-run prompt after menuet's event loop is running
 	app := tray.NewTrayApp(nil, nil, *bindFlag, *portFlag, *refreshFlag)
-	app.SetConfig(baseURL, token, paths.ConfigEnv, paths.DBPath, paths.ReadingsDir, paths.CacheDir)
+	app.SetConfig(baseURL, token, paths.ConfigEnv, paths.DBPath, paths.ReadingsDir, paths.CacheDir, paths.TariffPath)
 
 	log.Printf("runTray: calling app.Run()")
 	app.Run() // blocks forever
