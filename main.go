@@ -24,6 +24,7 @@ import (
 	"github.com/xntrik/growud/growatt"
 	"github.com/xntrik/growud/keystore"
 	"github.com/xntrik/growud/server"
+	"github.com/xntrik/growud/tariff"
 	"github.com/xntrik/growud/tray"
 )
 
@@ -108,6 +109,8 @@ func main() {
 		runCollect(baseURL, token, verbose, subArgs)
 	case "chart":
 		runChart(subArgs)
+	case "cost":
+		runCost(subArgs)
 	case "serve":
 		runServe(baseURL, token, subArgs)
 	case "tray":
@@ -243,6 +246,117 @@ func runCollect(baseURL, token string, verbose bool, args []string) {
 	}
 }
 
+// --- Cost subcommand ---
+
+func runCost(args []string) {
+	fs := flag.NewFlagSet("cost", flag.ExitOnError)
+	dateFlag := fs.String("date", "", "Calculate cost for a specific date (YYYY-MM-DD)")
+	fromFlag := fs.String("from", "", "Start date (YYYY-MM-DD)")
+	toFlag := fs.String("to", "", "End date (YYYY-MM-DD)")
+	deviceFlag := fs.String("device", "", "Device serial number (auto-detected if omitted)")
+	tariffFlag := fs.String("tariff", paths.TariffPath, "Path to tariff config JSON file")
+	fs.Parse(args)
+
+	// Determine date range
+	today := time.Now().Format("2006-01-02")
+	startDate, endDate := today, today
+
+	if *dateFlag != "" {
+		startDate = *dateFlag
+		endDate = *dateFlag
+	} else if *fromFlag != "" || *toFlag != "" {
+		if *fromFlag == "" || *toFlag == "" {
+			fmt.Fprintln(os.Stderr, "Error: both --from and --to are required for range calculation.")
+			os.Exit(1)
+		}
+		startDate = *fromFlag
+		endDate = *toFlag
+	}
+
+	// Validate dates
+	if _, err := time.Parse("2006-01-02", startDate); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid start date %q (use YYYY-MM-DD)\n", startDate)
+		os.Exit(1)
+	}
+	if _, err := time.Parse("2006-01-02", endDate); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid end date %q (use YYYY-MM-DD)\n", endDate)
+		os.Exit(1)
+	}
+
+	// Load tariff config
+	cfg, err := tariff.LoadConfig(*tariffFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading tariff config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Open store
+	store, err := growatt.NewStore(paths.DBPath, paths.ReadingsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening store: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Auto-detect device if not specified
+	deviceSN := *deviceFlag
+	if deviceSN == "" {
+		sns, err := store.ListDeviceSNs()
+		if err != nil || len(sns) == 0 {
+			fmt.Fprintln(os.Stderr, "No devices found in database. Run 'growud collect' first.")
+			os.Exit(1)
+		}
+		deviceSN = sns[0]
+	}
+
+	calc := tariff.NewCalculator(cfg, store)
+	result, err := calc.Calculate(deviceSN, startDate, endDate)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error calculating costs: %v\n", err)
+		os.Exit(1)
+	}
+
+	printCostResult(result)
+}
+
+func printCostResult(r *tariff.CostResult) {
+	dateRange := r.From
+	if r.From != r.To {
+		dateRange = r.From + " to " + r.To
+	}
+	fmt.Printf("Grid Cost Summary: %s (%s)\n", dateRange, r.Timezone)
+	fmt.Printf("Device: %s\n\n", r.DeviceSN)
+
+	printDirectionTable("Import (cost)", r.Import, r.Currency)
+	fmt.Println()
+	printDirectionTable("Export (credit)", r.Export, r.Currency)
+
+	fmt.Println()
+	netDollars := r.NetCents / 100.0
+	if r.NetCents >= 0 {
+		fmt.Printf("  Net: %s $%.2f cost\n", r.Currency, netDollars)
+	} else {
+		fmt.Printf("  Net: %s $%.2f credit\n", r.Currency, -netDollars)
+	}
+}
+
+func printDirectionTable(label string, dr tariff.DirectionResult, currency string) {
+	fmt.Printf("  %s\n", label)
+	fmt.Printf("  %-24s %10s %10s %10s\n", "Window", "kWh", "Rate", "Amount")
+	fmt.Printf("  %s\n", strings.Repeat("-", 56))
+
+	for _, w := range dr.Windows {
+		if w.KWh == 0 {
+			continue
+		}
+		fmt.Printf("  %-24s %10.2f %8.1fc %8s$%.2f\n",
+			w.Name, w.KWh, w.CentsPerKWh, currency+" ", w.CostCents/100.0)
+	}
+	fmt.Printf("  %s\n", strings.Repeat("-", 56))
+	fmt.Printf("  %-24s %10.2f %10s %8s$%.2f\n",
+		"Total", dr.TotalKWh, "", currency+" ", dr.TotalCents/100.0)
+}
+
 type dateChunk struct {
 	start, end string
 }
@@ -349,6 +463,12 @@ func runServe(baseURL, token string, args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating server: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Load tariff config if available (optional for serve mode)
+	if cfg, err := tariff.LoadConfig(paths.TariffPath); err == nil {
+		srv.SetTariffConfig(cfg)
+		fmt.Printf("Tariff config loaded from %s\n", paths.TariffPath)
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM

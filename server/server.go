@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xntrik/growud/growatt"
+	"github.com/xntrik/growud/tariff"
 )
 
 //go:embed logo.png
@@ -24,12 +25,13 @@ var (
 
 // Server handles the HTTP dashboard.
 type Server struct {
-	client *growatt.Client
-	store  *growatt.Store
-	bind   string
-	port   int
-	tmpl   *template.Template
-	srv    *http.Server
+	client    *growatt.Client
+	store     *growatt.Store
+	bind      string
+	port      int
+	tmpl      *template.Template
+	srv       *http.Server
+	tariffCfg *tariff.Config
 }
 
 // NewServer creates a new dashboard server.
@@ -55,6 +57,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/favicon.png", handleFavicon)
 	mux.HandleFunc("/api/summary", s.handleAPISummary)
 	mux.HandleFunc("/api/readings", s.handleAPIReadings)
+	mux.HandleFunc("/api/cost", s.handleAPICost)
 
 	addr := fmt.Sprintf("%s:%d", s.bind, s.port)
 	fmt.Printf("Growud server listening on http://%s\n", addr)
@@ -331,6 +334,72 @@ func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// SetTariffConfig sets the tariff configuration for cost calculations.
+// If not set, the /api/cost endpoint returns a 501 error.
+func (s *Server) SetTariffConfig(cfg *tariff.Config) {
+	s.tariffCfg = cfg
+}
+
+func (s *Server) handleAPICost(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.tariffCfg == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "tariff configuration not loaded; create a tariff.json file",
+		})
+		return
+	}
+
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+
+	if from == "" {
+		from = time.Now().Format("2006-01-02")
+	}
+	if to == "" {
+		to = from
+	}
+
+	if !dateRe.MatchString(from) || !dateRe.MatchString(to) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid date format, expected YYYY-MM-DD"})
+		return
+	}
+	if _, err := time.Parse("2006-01-02", from); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid from date"})
+		return
+	}
+	if _, err := time.Parse("2006-01-02", to); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid to date"})
+		return
+	}
+
+	deviceSN := r.URL.Query().Get("device")
+	if deviceSN == "" {
+		sns, err := s.store.ListDeviceSNs()
+		if err != nil || len(sns) == 0 {
+			writeJSON(w, http.StatusOK, map[string]string{"error": "no devices found"})
+			return
+		}
+		deviceSN = sns[0]
+	} else if !deviceSNRe.MatchString(deviceSN) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device serial number"})
+		return
+	}
+
+	calc := tariff.NewCalculator(s.tariffCfg, s.store)
+	result, err := calc.Calculate(deviceSN, from, to)
+	if err != nil {
+		log.Printf("Error calculating cost for %s (%s to %s): %v", deviceSN, from, to, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to calculate cost"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func handleFavicon(w http.ResponseWriter, r *http.Request) {

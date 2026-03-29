@@ -13,6 +13,7 @@ type AppPaths struct {
 	DBPath      string // growud.db full path
 	ConfigEnv   string // config.env full path
 	ReadingsDir string // raw JSON archive
+	TariffPath  string // tariff.json full path
 	LogDir      string // log files (bundle mode only)
 	LogPath     string // growud.log full path
 }
@@ -44,6 +45,7 @@ func cliPaths() AppPaths {
 		DBPath:      "growud.db",
 		ConfigEnv:   ".env",
 		ReadingsDir: ".cache/readings",
+		TariffPath:  "tariff.json",
 	}
 }
 
@@ -64,6 +66,7 @@ func bundlePaths() AppPaths {
 		DBPath:      filepath.Join(dataDir, "growud.db"),
 		ConfigEnv:   filepath.Join(dataDir, "config.env"),
 		ReadingsDir: filepath.Join(cacheDir, "readings"),
+		TariffPath:  filepath.Join(dataDir, "tariff.json"),
 		LogDir:      logDir,
 		LogPath:     filepath.Join(logDir, "growud.log"),
 	}

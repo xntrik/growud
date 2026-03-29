@@ -275,14 +275,14 @@ func mapGetStr(data map[string]any, key string) string {
 
 // TimeSeriesPoint represents a single time-series data point for charting.
 type TimeSeriesPoint struct {
-	Time             time.Time
-	PPVTotal         float64
-	LoadPower        float64
-	SOC              float64
-	ChargePower      float64
-	DischargePower   float64
-	GridImportPower  float64
-	GridExportPower  float64
+	Time            time.Time
+	PPVTotal        float64
+	LoadPower       float64
+	SOC             float64
+	ChargePower     float64
+	DischargePower  float64
+	GridImportPower float64
+	GridExportPower float64
 }
 
 // BatteryPower returns net battery power (positive = discharging, negative = charging).
@@ -331,6 +331,66 @@ func (s *Store) QueryDayReadings(deviceSN, date string) ([]TimeSeriesPoint, erro
 				p.Time = t
 				break
 			}
+		}
+		points = append(points, p)
+	}
+	return points, rows.Err()
+}
+
+// CostReadingPoint holds the fields needed for cost calculation.
+type CostReadingPoint struct {
+	Time            time.Time
+	GridImportPower float64 // instantaneous watts
+	GridExportPower float64 // instantaneous watts
+	GridImportToday float64 // cumulative kWh
+	GridExportToday float64 // cumulative kWh
+}
+
+// QueryRangeReadings returns cost-relevant data points for a device across a date range.
+// The from and to parameters are date strings in YYYY-MM-DD format (inclusive).
+func (s *Store) QueryRangeReadings(deviceSN, from, to string) ([]CostReadingPoint, error) {
+	rows, err := s.db.Query(`
+		SELECT recorded_at, grid_import_power, grid_export_power,
+		       grid_import_today, grid_export_today
+		FROM readings
+		WHERE device_sn = ? AND recorded_at >= ? AND recorded_at < ?
+		ORDER BY recorded_at`,
+		deviceSN, from, to+" 99") // " 99" sorts after any time on the to date
+	if err != nil {
+		return nil, fmt.Errorf("querying range readings: %w", err)
+	}
+	defer rows.Close()
+
+	var points []CostReadingPoint
+	for rows.Next() {
+		var p CostReadingPoint
+		var recordedAt string
+		var importPower, exportPower, importToday, exportToday sql.NullFloat64
+		err := rows.Scan(&recordedAt, &importPower, &exportPower, &importToday, &exportToday)
+		if err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+		for _, layout := range []string{
+			"2006-01-02 15:04:05 +0000 UTC",
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05Z",
+		} {
+			if t, err := time.Parse(layout, recordedAt); err == nil {
+				p.Time = t
+				break
+			}
+		}
+		if importPower.Valid {
+			p.GridImportPower = importPower.Float64
+		}
+		if exportPower.Valid {
+			p.GridExportPower = exportPower.Float64
+		}
+		if importToday.Valid {
+			p.GridImportToday = importToday.Float64
+		}
+		if exportToday.Valid {
+			p.GridExportToday = exportToday.Float64
 		}
 		points = append(points, p)
 	}

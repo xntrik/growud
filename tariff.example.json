@@ -1,0 +1,63 @@
+{
+  "timezone": "Australia/Sydney",
+  "currency": "AUD",
+  "import": [
+    {
+      "name": "peak",
+      "cents_per_kwh": 45.0,
+      "from": "14:00",
+      "to": "20:00",
+      "days": ["mon", "tue", "wed", "thu", "fri"]
+    },
+    {
+      "name": "shoulder",
+      "cents_per_kwh": 30.0,
+      "from": "07:00",
+      "to": "14:00",
+      "days": ["mon", "tue", "wed", "thu", "fri"]
+    },
+    {
+      "name": "shoulder_evening",
+      "cents_per_kwh": 30.0,
+      "from": "20:00",
+      "to": "22:00",
+      "days": ["mon", "tue", "wed", "thu", "fri"]
+    },
+    {
+      "name": "off_peak",
+      "cents_per_kwh": 18.0,
+      "from": "22:00",
+      "to": "07:00"
+    },
+    {
+      "name": "off_peak_weekend",
+      "cents_per_kwh": 18.0,
+      "from": "00:00",
+      "to": "00:00",
+      "days": ["sat", "sun"]
+    }
+  ],
+  "export": [
+    {
+      "name": "solar_sponge",
+      "cents_per_kwh": 2.0,
+      "from": "10:00",
+      "to": "15:00",
+      "days": ["all"]
+    },
+    {
+      "name": "standard_fit",
+      "cents_per_kwh": 5.0,
+      "from": "00:00",
+      "to": "10:00",
+      "days": ["all"]
+    },
+    {
+      "name": "standard_fit_afternoon",
+      "cents_per_kwh": 5.0,
+      "from": "15:00",
+      "to": "00:00",
+      "days": ["all"]
+    }
+  ]
+}
