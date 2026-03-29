@@ -469,6 +469,8 @@ func runServe(baseURL, token string, args []string) {
 	if cfg, err := tariff.LoadConfig(paths.TariffPath); err == nil {
 		srv.SetTariffConfig(cfg)
 		fmt.Printf("Tariff config loaded from %s\n", paths.TariffPath)
+	} else {
+		fmt.Fprintf(os.Stderr, "Tariff config not loaded: %v\n", err)
 	}
 
 	// Graceful shutdown on SIGINT/SIGTERM
