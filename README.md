@@ -16,6 +16,7 @@ A monitoring and data collection tool for **Growatt** hybrid solar inverters. Pr
 - **Interactive terminal charts** with pan/zoom controls
 - **Web dashboard** with live metrics and Chart.js visualizations
 - **macOS menu bar app** with status indicator and embedded web server
+- **Grid cost/credit calculation** with time-of-use tariff support
 - **File-based API cache** to minimize Growatt API calls
 
 ## Requirements
@@ -52,6 +53,18 @@ export GROWATT_TOKEN=your_token_here
 
 # Interactive terminal chart
 ./growud chart -date 2026-03-28 -device YOUR_DEVICE_SN
+
+# Calculate grid cost for today (requires tariff.json)
+./growud cost
+
+# Calculate cost for a specific date
+./growud cost -date 2026-03-28
+
+# Calculate cost for a date range
+./growud cost -from 2026-03-01 -to 2026-03-28
+
+# Specify device and tariff config path
+./growud cost -date 2026-03-28 -device YOUR_DEVICE_SN -tariff /path/to/tariff.json
 
 # Start the web dashboard (localhost only by default)
 ./growud serve -port 8080
@@ -94,6 +107,48 @@ Non-secret configuration is loaded from environment variables, which can be set 
 | `GROWUD_PORT` | Web dashboard port | `8080` |
 | `GROWUD_REFRESH` | Refresh interval (minutes) | `5` |
 
+### Tariff Configuration
+
+To enable grid cost/credit calculations, create a `tariff.json` file. When running as a CLI, place it in the working directory. When running as a macOS `.app` bundle, place it at `~/Library/Application Support/Growud/tariff.json`.
+
+```json
+{
+  "timezone": "Australia/Sydney",
+  "currency": "AUD",
+  "import": [
+    {
+      "name": "peak",
+      "cents_per_kwh": 45.0,
+      "from": "14:00",
+      "to": "20:00",
+      "days": ["mon", "tue", "wed", "thu", "fri"]
+    },
+    {
+      "name": "off_peak",
+      "cents_per_kwh": 18.0,
+      "from": "00:00",
+      "to": "00:00"
+    }
+  ],
+  "export": [
+    {
+      "name": "feed_in",
+      "cents_per_kwh": 5.0,
+      "from": "00:00",
+      "to": "00:00"
+    }
+  ]
+}
+```
+
+**Time windows:**
+- `from` and `to` use `HH:MM` format (24-hour)
+- `"00:00"` to `"00:00"` means all day
+- Overnight windows are supported (e.g. `"22:00"` to `"07:00"`)
+- `days` accepts `"mon"` through `"sun"`, `"all"`, or omit for all days
+
+Windows are matched in order — place more specific windows (e.g. peak) before catch-all windows (e.g. off-peak).
+
 ### Path Resolution
 
 When running as a **CLI**, data files are stored relative to the working directory (`.env`, `.cache/`, `growud.db`).
@@ -113,6 +168,7 @@ When running as a **macOS .app bundle**, standard macOS directories are used:
 | `GET /` | HTML dashboard |
 | `GET /api/summary` | JSON plant/device summary with current values |
 | `GET /api/readings?date=YYYY-MM-DD&device=SN` | Historical readings for charting |
+| `GET /api/cost?from=YYYY-MM-DD&to=YYYY-MM-DD&device=SN` | Grid import cost and export credit (requires `tariff.json`) |
 
 ## Building
 
