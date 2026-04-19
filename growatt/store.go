@@ -281,8 +281,10 @@ type TimeSeriesPoint struct {
 	SOC             float64
 	ChargePower     float64
 	DischargePower  float64
-	GridImportPower float64
-	GridExportPower float64
+	GridImportPower float64 // instantaneous watts (pacToUserTotal); unreliable — spurious spikes
+	GridExportPower float64 // instantaneous watts (pacToGridTotal)
+	GridImportToday float64 // cumulative kWh (etoUserToday), resets at midnight
+	GridExportToday float64 // cumulative kWh (etoGridToday), resets at midnight
 }
 
 // BatteryPower returns net battery power (positive = discharging, negative = charging).
@@ -302,7 +304,8 @@ func (s *Store) QueryDayReadings(deviceSN, date string) ([]TimeSeriesPoint, erro
 	rows, err := s.db.Query(`
 		SELECT recorded_at, ppv_total, load_power, soc,
 		       charge_power, discharge_power,
-		       grid_import_power, grid_export_power
+		       grid_import_power, grid_export_power,
+		       grid_import_today, grid_export_today
 		FROM readings
 		WHERE device_sn = ? AND recorded_at LIKE ?
 		ORDER BY recorded_at`,
@@ -318,7 +321,8 @@ func (s *Store) QueryDayReadings(deviceSN, date string) ([]TimeSeriesPoint, erro
 		var recordedAt string
 		err := rows.Scan(&recordedAt, &p.PPVTotal, &p.LoadPower, &p.SOC,
 			&p.ChargePower, &p.DischargePower,
-			&p.GridImportPower, &p.GridExportPower)
+			&p.GridImportPower, &p.GridExportPower,
+			&p.GridImportToday, &p.GridExportToday)
 		if err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}

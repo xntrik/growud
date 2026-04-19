@@ -231,6 +231,78 @@ func TestHandleAPIReadings_WithData(t *testing.T) {
 	}
 }
 
+// TestHandleAPIReadings_DerivedGridPower verifies that grid_in/grid_out are
+// derived from the cumulative counter deltas rather than the raw
+// pacToUserTotal / pacToGridTotal fields. This is the fix for spurious spikes
+// returned occasionally by the Growatt API in the instantaneous fields.
+func TestHandleAPIReadings_DerivedGridPower(t *testing.T) {
+	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	// Three samples 5 minutes apart. The instantaneous pacToUserTotal has a
+	// bogus 6000 W spike in the middle sample; the counter only advances by
+	// 0.1 kWh between samples, so the derived value should be sane.
+	datas := []map[string]any{
+		{
+			"time":           "2026-03-27 10:00:00",
+			"etoUserToday":   float64(0.0),
+			"etoGridToday":   float64(1.0),
+			"pacToUserTotal": float64(0),
+			"pacToGridTotal": float64(2000),
+		},
+		{
+			"time":           "2026-03-27 10:05:00",
+			"etoUserToday":   float64(0.1), // 0.1 kWh imported in 5 min = 1200 W avg
+			"etoGridToday":   float64(1.2), // 0.2 kWh exported in 5 min = 2400 W avg
+			"pacToUserTotal": float64(6000), // spurious spike
+			"pacToGridTotal": float64(2500),
+		},
+		{
+			"time":           "2026-03-27 10:10:00",
+			"etoUserToday":   float64(0.1), // no further import
+			"etoGridToday":   float64(1.4), // another 0.2 kWh export
+			"pacToUserTotal": float64(0),
+			"pacToGridTotal": float64(2600),
+		},
+	}
+	if _, _, err := srv.store.UpsertReadings("SN001", 5, datas); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/readings?date=2026-03-27&device=SN001", nil)
+	w := httptest.NewRecorder()
+	srv.handleAPIReadings(w, req)
+
+	var resp readingsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Readings) != 3 {
+		t.Fatalf("got %d readings, want 3", len(resp.Readings))
+	}
+
+	// First sample: no prior sample, derived values are 0.
+	if resp.Readings[0].GridIn != 0 || resp.Readings[0].GridOut != 0 {
+		t.Errorf("sample 0: GridIn=%f, GridOut=%f, want 0,0",
+			resp.Readings[0].GridIn, resp.Readings[0].GridOut)
+	}
+
+	// Second sample: 0.1 kWh over 5 min = 1200 W. The 6000 W spike is ignored.
+	if got := resp.Readings[1].GridIn; got < 1199 || got > 1201 {
+		t.Errorf("sample 1: GridIn=%f, want ~1200 (not the 6000 W spike)", got)
+	}
+	if got := resp.Readings[1].GridOut; got < 2399 || got > 2401 {
+		t.Errorf("sample 1: GridOut=%f, want ~2400", got)
+	}
+
+	// Third sample: no further import, counter flat → 0 W.
+	if resp.Readings[2].GridIn != 0 {
+		t.Errorf("sample 2: GridIn=%f, want 0", resp.Readings[2].GridIn)
+	}
+	if got := resp.Readings[2].GridOut; got < 2399 || got > 2401 {
+		t.Errorf("sample 2: GridOut=%f, want ~2400", got)
+	}
+}
+
 func TestHandleAPISummary(t *testing.T) {
 	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		var resp map[string]any

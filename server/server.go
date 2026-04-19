@@ -321,19 +321,48 @@ func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
 		Readings: make([]readingPoint, 0, len(points)),
 	}
 
-	for _, p := range points {
+	gridInW, gridOutW := deriveGridPower(points)
+
+	for i, p := range points {
 		resp.Readings = append(resp.Readings, readingPoint{
 			Time:      p.Time.Format("2006-01-02T15:04:05"),
 			Solar:     p.PPVTotal,
 			Load:      p.LoadPower,
 			Discharge: p.DischargePower,
 			Charge:    p.ChargePower,
-			GridIn:    p.GridImportPower,
-			GridOut:   p.GridExportPower,
+			GridIn:    gridInW[i],
+			GridOut:   gridOutW[i],
 		})
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// deriveGridPower computes instantaneous grid import/export watts for each
+// sample by differencing the device's cumulative daily counters between
+// consecutive samples. This is more reliable than the instantaneous
+// pacToUserTotal / pacToGridTotal fields, which occasionally return spurious
+// spikes. The derived series integrates exactly to the counter total.
+//
+// The first sample gets 0 since there is no prior sample to diff against.
+// Negative deltas (counter reset at midnight, or across-day queries) also
+// yield 0.
+func deriveGridPower(points []growatt.TimeSeriesPoint) (gridIn, gridOut []float64) {
+	gridIn = make([]float64, len(points))
+	gridOut = make([]float64, len(points))
+	for i := 1; i < len(points); i++ {
+		hours := points[i].Time.Sub(points[i-1].Time).Hours()
+		if hours <= 0 {
+			continue
+		}
+		if d := points[i].GridImportToday - points[i-1].GridImportToday; d > 0 {
+			gridIn[i] = d * 1000.0 / hours
+		}
+		if d := points[i].GridExportToday - points[i-1].GridExportToday; d > 0 {
+			gridOut[i] = d * 1000.0 / hours
+		}
+	}
+	return gridIn, gridOut
 }
 
 // SetTariffConfig sets the tariff configuration for cost calculations.
