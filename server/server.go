@@ -321,19 +321,79 @@ func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
 		Readings: make([]readingPoint, 0, len(points)),
 	}
 
-	for _, p := range points {
+	gridInW, gridOutW := deriveGridPower(points)
+
+	for i, p := range points {
 		resp.Readings = append(resp.Readings, readingPoint{
 			Time:      p.Time.Format("2006-01-02T15:04:05"),
 			Solar:     p.PPVTotal,
 			Load:      p.LoadPower,
 			Discharge: p.DischargePower,
 			Charge:    p.ChargePower,
-			GridIn:    p.GridImportPower,
-			GridOut:   p.GridExportPower,
+			GridIn:    gridInW[i],
+			GridOut:   gridOutW[i],
 		})
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// deriveGridPower computes instantaneous grid import/export watts for each
+// sample using a hybrid strategy:
+//   - If the cumulative daily counter (etoUserToday / etoGridToday) advanced
+//     since the previous sample, use the delta as the authoritative average
+//     power over the interval.
+//   - If the counter was flat, fall back to the instantaneous power reading
+//     (pacToUserTotal / pacToGridTotal) clamped to the quantization ceiling:
+//     if the counter did not tick, the true average power must have been
+//     below 0.1 kWh per interval — anything higher is a spurious API spike.
+//
+// This keeps resolution for small grid flows that sit below the counter's
+// 0.1 kWh tick (e.g. trickle import at night when sampling is sparse) while
+// suppressing the 6 kW+ bogus spikes we have observed from the API.
+//
+// The first sample has no prior sample to diff against and is left at 0.
+// Negative deltas (counter reset at midnight, cross-day queries) fall back
+// to the same clamped-instantaneous path.
+func deriveGridPower(points []growatt.TimeSeriesPoint) (gridIn, gridOut []float64) {
+	gridIn = make([]float64, len(points))
+	gridOut = make([]float64, len(points))
+	for i := 1; i < len(points); i++ {
+		hours := points[i].Time.Sub(points[i-1].Time).Hours()
+		if hours <= 0 {
+			continue
+		}
+		ceilingW := counterQuantumKWh * 1000.0 / hours
+		gridIn[i] = hybridPower(
+			points[i].GridImportToday-points[i-1].GridImportToday,
+			points[i].GridImportPower,
+			hours, ceilingW)
+		gridOut[i] = hybridPower(
+			points[i].GridExportToday-points[i-1].GridExportToday,
+			points[i].GridExportPower,
+			hours, ceilingW)
+	}
+	return gridIn, gridOut
+}
+
+// counterQuantumKWh is the observed resolution of the Growatt daily energy
+// counters (etoUserToday / etoGridToday).
+const counterQuantumKWh = 0.1
+
+// hybridPower returns the best estimate of average watts for an interval:
+// prefer the cumulative-counter delta, otherwise the instantaneous reading
+// clamped to a physical ceiling derived from the counter quantum.
+func hybridPower(deltaKWh, instantW, hours, ceilingW float64) float64 {
+	if deltaKWh > 0 {
+		return deltaKWh * 1000.0 / hours
+	}
+	if instantW < 0 {
+		return 0
+	}
+	if instantW > ceilingW {
+		return ceilingW
+	}
+	return instantW
 }
 
 // SetTariffConfig sets the tariff configuration for cost calculations.
