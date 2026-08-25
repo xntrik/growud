@@ -14,6 +14,8 @@ type AppPaths struct {
 	ConfigEnv   string // config.env full path
 	ReadingsDir string // raw JSON archive
 	TariffPath  string // tariff.json full path
+	NotifyPath  string // notifications.json full path
+	NotifyState string // notify_state.json full path
 	LogDir      string // log files (bundle mode only)
 	LogPath     string // growud.log full path
 }
@@ -46,6 +48,8 @@ func cliPaths() AppPaths {
 		ConfigEnv:   ".env",
 		ReadingsDir: ".cache/readings",
 		TariffPath:  "tariff.json",
+		NotifyPath:  "notifications.json",
+		NotifyState: "notify_state.json",
 	}
 }
 
@@ -67,6 +71,8 @@ func bundlePaths() AppPaths {
 		ConfigEnv:   filepath.Join(dataDir, "config.env"),
 		ReadingsDir: filepath.Join(cacheDir, "readings"),
 		TariffPath:  filepath.Join(dataDir, "tariff.json"),
+		NotifyPath:  filepath.Join(dataDir, "notifications.json"),
+		NotifyState: filepath.Join(dataDir, "notify_state.json"),
 		LogDir:      logDir,
 		LogPath:     filepath.Join(logDir, "growud.log"),
 	}

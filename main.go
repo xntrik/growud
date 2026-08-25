@@ -23,6 +23,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/xntrik/growud/growatt"
 	"github.com/xntrik/growud/keystore"
+	"github.com/xntrik/growud/notify"
 	"github.com/xntrik/growud/server"
 	"github.com/xntrik/growud/tariff"
 	"github.com/xntrik/growud/tray"
@@ -111,6 +112,8 @@ func main() {
 		runChart(subArgs)
 	case "cost":
 		runCost(subArgs)
+	case "notify":
+		runNotify(baseURL, token, subArgs)
 	case "serve":
 		runServe(baseURL, token, subArgs)
 	case "tray":
@@ -380,11 +383,22 @@ func chunkDateRange(start, end time.Time, maxDays int) []dateChunk {
 	return chunks
 }
 
+// discoverDevices returns the supported devices, exiting on failure. Callers
+// that must survive a transient API error — anything running in a loop —
+// should use discoverDevicesErr instead.
 func discoverDevices(client *growatt.Client, verbose bool) []growatt.Device {
+	devices, err := discoverDevicesErr(client, verbose)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	return devices
+}
+
+func discoverDevicesErr(client *growatt.Client, verbose bool) ([]growatt.Device, error) {
 	plantList, err := client.ListPlants()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error listing plants: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("listing plants: %w", err)
 	}
 
 	var devices []growatt.Device
@@ -403,7 +417,153 @@ func discoverDevices(client *growatt.Client, verbose bool) []growatt.Device {
 			}
 		}
 	}
-	return devices
+	return devices, nil
+}
+
+// --- Notify subcommand ---
+
+// runNotify checks a notification config against live data. It is a dry run:
+// rules are evaluated and the results printed, but nothing is sent and the
+// firing history is left untouched. The tray app is what actually delivers
+// notifications. Use -test to send a real message to every target.
+func runNotify(baseURL, token string, args []string) {
+	fs := flag.NewFlagSet("notify", flag.ExitOnError)
+	configFlag := fs.String("config", paths.NotifyPath, "Path to notification config JSON file")
+	deviceFlag := fs.String("device", "", "Device serial number (auto-detected if omitted)")
+	testFlag := fs.Bool("test", false, "Send a test notification to every configured target and exit")
+	fs.Parse(args)
+
+	cfg, err := notify.LoadConfig(*configFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading notification config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// No state path: a dry run must never consume a rule's edge trigger or
+	// start its cooldown.
+	engine := notify.NewEngine(cfg, "")
+	engine.SetLogger(func(format string, args ...any) {})
+
+	if *testFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		errs := engine.SendTest(ctx)
+		for _, err := range errs {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
+		if len(errs) > 0 {
+			os.Exit(1)
+		}
+		fmt.Printf("Test notification sent to %d target(s).\n", len(cfg.Targets))
+		return
+	}
+
+	client := newClient(baseURL, token)
+
+	device, data, err := latestDeviceData(client, *deviceFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	snapshot, results := engine.Evaluate(device.DeviceSN, data, time.Now())
+	printNotifyDryRun(cfg, *configFlag, snapshot, results)
+}
+
+// latestDeviceData fetches current data for one device, picking the first
+// supported device when no serial is given.
+func latestDeviceData(client *growatt.Client, deviceSN string) (growatt.Device, map[string]any, error) {
+	devices, err := discoverDevicesErr(client, false)
+	if err != nil {
+		return growatt.Device{}, nil, err
+	}
+	if len(devices) == 0 {
+		return growatt.Device{}, nil, fmt.Errorf("no supported devices found")
+	}
+
+	for _, device := range devices {
+		if deviceSN != "" && device.DeviceSN != deviceSN {
+			continue
+		}
+		data, err := client.GetDeviceLastData(device)
+		if err != nil {
+			if deviceSN != "" {
+				return growatt.Device{}, nil, fmt.Errorf("fetching data for %s: %w", deviceSN, err)
+			}
+			continue
+		}
+		return device, data, nil
+	}
+
+	if deviceSN != "" {
+		return growatt.Device{}, nil, fmt.Errorf("device %s not found", deviceSN)
+	}
+	return growatt.Device{}, nil, fmt.Errorf("no device returned usable data")
+}
+
+func printNotifyDryRun(cfg *notify.Config, configPath string, snapshot notify.Snapshot, results []notify.Result) {
+	fmt.Printf("Notification config: %s\n", configPath)
+	fmt.Printf("Timezone: %s   Location: %.4f, %.4f\n", cfg.Timezone, cfg.Site.Latitude, cfg.Site.Longitude)
+	fmt.Printf("Device: %s at %s (sunrise %s, sunset %s)\n\n",
+		snapshot.DeviceSN,
+		snapshot.At.Format("2006-01-02 15:04"),
+		formatSunTime(snapshot.Sunrise),
+		formatSunTime(snapshot.Sunset))
+
+	fmt.Println("  Metrics")
+	for _, name := range notify.MetricNames() {
+		fmt.Printf("    %-26s %10.2f\n", name, snapshot.Values[name])
+	}
+
+	fmt.Printf("\n  Rules (dry run — nothing is sent)\n")
+	if len(results) == 0 {
+		fmt.Println("    (no rules configured)")
+		return
+	}
+
+	for _, r := range results {
+		fmt.Printf("    %s %s\n", notifyStatusMarker(r), r.Rule.Name)
+		fmt.Printf("      when:    %s\n", r.Rule.When.Describe())
+
+		switch {
+		case r.Skipped != "":
+			fmt.Printf("      skipped: %s\n", r.Skipped)
+		case !r.Matched:
+			fmt.Printf("      skipped: condition not met\n")
+		}
+
+		if r.Matched {
+			fmt.Printf("      title:   %s\n", r.Notification.Title)
+			fmt.Printf("      message: %s\n", r.Notification.Message)
+			fmt.Printf("      targets: %s\n", strings.Join(targetNames(cfg, r.Rule), ", "))
+		}
+		fmt.Println()
+	}
+}
+
+// notifyStatusMarker flags whether a rule would notify right now.
+func notifyStatusMarker(r notify.Result) string {
+	if r.Matched && r.Skipped == "" {
+		return "[WOULD NOTIFY]"
+	}
+	return "[   quiet    ]"
+}
+
+func targetNames(cfg *notify.Config, rule *notify.Rule) []string {
+	targets := cfg.TargetsFor(rule)
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
+		names = append(names, fmt.Sprintf("%s (%s)", t.Name, t.Type))
+	}
+	return names
+}
+
+func formatSunTime(t time.Time) string {
+	if t.IsZero() {
+		return "--:--"
+	}
+	return t.Format("15:04")
 }
 
 // --- Tray subcommand ---
@@ -429,6 +589,7 @@ func runTray(baseURL, token string, args []string) {
 	// the first-run prompt after menuet's event loop is running
 	app := tray.NewTrayApp(nil, nil, *bindFlag, *portFlag, *refreshFlag)
 	app.SetConfig(baseURL, token, paths.ConfigEnv, paths.DBPath, paths.ReadingsDir, paths.CacheDir, paths.TariffPath)
+	app.SetNotifyConfig(paths.NotifyPath, paths.NotifyState)
 
 	log.Printf("runTray: calling app.Run()")
 	app.Run() // blocks forever
@@ -448,6 +609,7 @@ func runServe(baseURL, token string, args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	portFlag := fs.Int("port", envInt("GROWUD_PORT", 8080), "Port to listen on")
 	bindFlag := fs.String("bind", envStr("GROWUD_BIND", "127.0.0.1"), "Address to bind to")
+	refreshFlag := fs.Int("refresh", envInt("GROWUD_REFRESH", 5), "Notification evaluation interval in minutes")
 	fs.Parse(args)
 
 	client := newClient(baseURL, token)
@@ -473,20 +635,73 @@ func runServe(baseURL, token string, args []string) {
 		fmt.Fprintf(os.Stderr, "Tariff config not loaded: %v\n", err)
 	}
 
+	// Evaluate notification rules in the background, if any are configured.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if cfg, err := notify.LoadConfig(paths.NotifyPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Notifications not enabled: %v\n", err)
+	} else {
+		fmt.Printf("Notifications enabled: %d rule(s), %d target(s) from %s — evaluating every %d min\n",
+			len(cfg.Rules), len(cfg.Targets), paths.NotifyPath, *refreshFlag)
+		go notifyLoop(ctx, client, notify.NewEngine(cfg, paths.NotifyState), *refreshFlag)
+	}
+
 	// Graceful shutdown on SIGINT/SIGTERM
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		s := <-sig
 		fmt.Fprintf(os.Stderr, "\nShutting down (signal: %v)...\n", s)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(ctx)
+		cancel()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutCancel()
+		srv.Shutdown(shutCtx)
 	}()
 
 	if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// notifyLoop evaluates the notification rules on a ticker until ctx is done.
+// Every failure here is logged and retried on the next tick — a transient
+// Growatt API error must never take the web server down with it.
+func notifyLoop(ctx context.Context, client *growatt.Client, engine *notify.Engine, refreshMins int) {
+	if refreshMins < 1 {
+		refreshMins = 5
+	}
+
+	evaluate := func() {
+		device, data, err := latestDeviceData(client, "")
+		if err != nil {
+			log.Printf("Notification check skipped: %v", err)
+			return
+		}
+
+		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		_, results := engine.Run(runCtx, device.DeviceSN, data, time.Now())
+		for _, r := range results {
+			if r.Fired {
+				fmt.Printf("Notification sent for rule %q: %s\n", r.Rule.Name, r.Notification.Message)
+			}
+		}
+	}
+
+	evaluate()
+
+	ticker := time.NewTicker(time.Duration(refreshMins) * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			evaluate()
+		}
 	}
 }
 

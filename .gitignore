@@ -1,6 +1,8 @@
 .env
 .cache/
 *.db
+notifications.json
+notify_state.json
 growud
 Growud.app/
 .claude/

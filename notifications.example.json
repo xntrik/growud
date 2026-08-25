@@ -1,0 +1,102 @@
+{
+  "timezone": "Australia/Perth",
+  "location": {
+    "latitude": -31.9523,
+    "longitude": 115.8613
+  },
+  "targets": [
+    {
+      "name": "phone",
+      "type": "ntfy",
+      "url": "https://ntfy.sh/growud-CHANGE-ME-TO-SOMETHING-UNGUESSABLE",
+      "auth_token_env": "NTFY_TOKEN",
+      "priority": "default",
+      "tags": ["sun_with_face"],
+      "click": "http://localhost:8080"
+    },
+    {
+      "name": "home_assistant",
+      "type": "webhook",
+      "url": "https://home-assistant.example/api/webhook/growud",
+      "method": "POST",
+      "headers": {
+        "X-Growud": "1"
+      }
+    }
+  ],
+  "rules": [
+    {
+      "name": "ev_charge_window",
+      "title": "Good time to charge the EV",
+      "message": "Battery at {{battery_soc}}% and still making {{solar_power}}W, with {{hours_until_sunset}}h of sun left (sunset {{sunset}}). Plug the car in.",
+      "when": {
+        "all": [
+          {"metric": "battery_soc", "op": ">=", "value": 95},
+          {"metric": "minutes_until_sunset", "op": ">=", "value": 150},
+          {"metric": "solar_power", "op": ">", "value": 2000}
+        ]
+      },
+      "only_between": {"from": "08:00", "to": "18:00"},
+      "cooldown_minutes": 180,
+      "priority": "high",
+      "tags": ["car", "sunny"],
+      "targets": ["phone"]
+    },
+    {
+      "name": "spare_solar_going_to_grid",
+      "title": "Spare solar heading to the grid",
+      "message": "Exporting {{grid_export_power}}W with the battery at {{battery_soc}}%. Good time to run the dishwasher.",
+      "when": {
+        "all": [
+          {"metric": "grid_export_power", "op": ">", "value": 3000},
+          {"metric": "battery_soc", "op": ">=", "value": 90}
+        ]
+      },
+      "only_between": {"from": "09:00", "to": "16:00"},
+      "cooldown_minutes": 240,
+      "tags": ["sunny"],
+      "targets": ["phone"]
+    },
+    {
+      "name": "battery_low_overnight",
+      "title": "Battery running low",
+      "message": "Battery down to {{battery_soc}}% with the sun still down. Sunrise is at {{sunrise}}.",
+      "when": {
+        "all": [
+          {"metric": "battery_soc", "op": "<=", "value": 20},
+          {"metric": "sun_elevation", "op": "<", "value": 0}
+        ]
+      },
+      "cooldown_minutes": 120,
+      "tags": ["battery"],
+      "targets": ["phone"]
+    },
+    {
+      "name": "battery_running_hot",
+      "title": "Battery temperature high",
+      "message": "Battery is at {{battery_temp}}C ({{device}}).",
+      "when": {"metric": "battery_temp", "op": ">", "value": 45},
+      "cooldown_minutes": 60,
+      "priority": "urgent",
+      "tags": ["warning"],
+      "targets": ["phone"]
+    },
+    {
+      "name": "importing_at_peak_rate",
+      "enabled": false,
+      "title": "Pulling from the grid at peak",
+      "message": "Importing {{grid_import_power}}W at {{time}} with the battery at {{battery_soc}}%.",
+      "when": {
+        "all": [
+          {"metric": "grid_import_power", "op": ">", "value": 1500},
+          {"metric": "hour", "op": ">=", "value": 14},
+          {"metric": "hour", "op": "<", "value": 20},
+          {"not": {"metric": "weekday", "op": "==", "value": 0}},
+          {"not": {"metric": "weekday", "op": "==", "value": 6}}
+        ]
+      },
+      "cooldown_minutes": 60,
+      "targets": ["home_assistant"]
+    }
+  ]
+}

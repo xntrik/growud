@@ -16,6 +16,7 @@ import (
 	"github.com/caseymrm/menuet"
 	"github.com/xntrik/growud/growatt"
 	"github.com/xntrik/growud/keystore"
+	"github.com/xntrik/growud/notify"
 	"github.com/xntrik/growud/server"
 	"github.com/xntrik/growud/tariff"
 )
@@ -40,6 +41,11 @@ type TrayApp struct {
 	readingsDir string
 	cacheDir    string
 	tariffPath  string
+
+	// Optional notification engine, nil when notifications.json is absent
+	notifyPath  string
+	notifyState string
+	notifier    *notify.Engine
 
 	// Shutdown coordination
 	cancel context.CancelFunc
@@ -72,6 +78,13 @@ func (t *TrayApp) SetConfig(baseURL, token, configEnv, dbPath, readingsDir, cach
 	t.readingsDir = readingsDir
 	t.cacheDir = cacheDir
 	t.tariffPath = tariffPath
+}
+
+// SetNotifyConfig points the tray at an optional notifications config and the
+// file used to remember which rules have already fired.
+func (t *TrayApp) SetNotifyConfig(configPath, statePath string) {
+	t.notifyPath = configPath
+	t.notifyState = statePath
 }
 
 // Run starts the menu bar app. Blocks forever.
@@ -221,8 +234,29 @@ func (t *TrayApp) initialize() error {
 	}
 	t.store = store
 
+	t.initNotifier()
+
 	log.Printf("Initialization complete (refresh every %d min)", t.refreshMins)
 	return nil
+}
+
+// initNotifier loads the notification config if one exists. Notifications are
+// entirely optional, so a missing or invalid config is logged and the app
+// carries on without them.
+func (t *TrayApp) initNotifier() {
+	if t.notifyPath == "" {
+		return
+	}
+
+	cfg, err := notify.LoadConfig(t.notifyPath)
+	if err != nil {
+		log.Printf("Notifications not enabled: %v", err)
+		return
+	}
+
+	t.notifier = notify.NewEngine(cfg, t.notifyState)
+	log.Printf("Notifications enabled: %d rule(s), %d target(s) from %s",
+		len(cfg.Rules), len(cfg.Targets), t.notifyPath)
 }
 
 func (t *TrayApp) refreshLoop(ctx context.Context) {
@@ -282,10 +316,30 @@ func (t *TrayApp) refresh() {
 			growatt.MapGetFloat(data, "ppv"),
 			growatt.MapGetFloat(data, "soc"),
 			growatt.MapGetFloat(data, "plocalLoadTotal"))
+
+		t.runNotifications(device.DeviceSN, data)
 		return
 	}
 
 	t.setTitle("growud")
+}
+
+// runNotifications evaluates the notification rules against the data this
+// refresh already fetched, so no extra API calls are made.
+func (t *TrayApp) runNotifications(deviceSN string, data map[string]any) {
+	if t.notifier == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, results := t.notifier.Run(ctx, deviceSN, data, time.Now())
+	for _, r := range results {
+		if r.Fired {
+			log.Printf("Notification sent for rule %q: %s", r.Rule.Name, r.Notification.Message)
+		}
+	}
 }
 
 func (t *TrayApp) updateTitle(data map[string]any) {
@@ -362,11 +416,41 @@ func (t *TrayApp) menuItems() []menuet.MenuItem {
 		// Actions
 		t.openDashboardItem(),
 		t.collectNowItem(),
-		// menuSeparator(),
-		// t.quitItem(),
 	}
 
+	if t.notifier != nil {
+		items = append(items, t.testNotificationsItem())
+	}
+	// menuSeparator(),
+	// t.quitItem(),
+
 	return items
+}
+
+// testNotificationsItem sends a fixed message to every configured target, so
+// an ntfy topic can be verified without waiting for a rule to fire.
+func (t *TrayApp) testNotificationsItem() menuet.MenuItem {
+	return menuet.MenuItem{
+		Text: "Test Notifications",
+		Clicked: func() {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+
+				subtitle := "Test notification sent"
+				if errs := t.notifier.SendTest(ctx); len(errs) > 0 {
+					for _, err := range errs {
+						log.Printf("Test notification error: %v", err)
+					}
+					subtitle = fmt.Sprintf("Test failed: %v", errs[0])
+				}
+				menuet.App().Notification(menuet.Notification{
+					Title:    "Growud",
+					Subtitle: subtitle,
+				})
+			}()
+		},
+	}
 }
 
 func (t *TrayApp) batteryStatusItem(data map[string]any) menuet.MenuItem {
