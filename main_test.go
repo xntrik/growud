@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/xntrik/growud/notify"
 )
 
 func TestChunkDateRange_SingleDay(t *testing.T) {
@@ -86,5 +88,21 @@ func TestPlantStatus(t *testing.T) {
 		if got := plantStatus(tt.status); got != tt.want {
 			t.Errorf("plantStatus(%d) = %q, want %q", tt.status, got, tt.want)
 		}
+	}
+}
+
+// TestNotificationsExampleConfigIsValid keeps the shipped example honest: it
+// has to survive the same validation a user's own config gets.
+func TestNotificationsExampleConfigIsValid(t *testing.T) {
+	cfg, err := notify.LoadConfig("notifications.example.json")
+	if err != nil {
+		t.Fatalf("notifications.example.json does not load: %v", err)
+	}
+
+	if len(cfg.Rules) == 0 {
+		t.Error("the example config should ship with at least one rule")
+	}
+	if len(cfg.Targets) == 0 {
+		t.Error("the example config should ship with at least one target")
 	}
 }
