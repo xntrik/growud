@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"time"
@@ -338,41 +339,47 @@ func (s *Server) handleAPIReadings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// deriveGridPower computes instantaneous grid import/export watts for each
-// sample using a hybrid strategy:
-//   - If the cumulative daily counter (etoUserToday / etoGridToday) advanced
-//     since the previous sample, use the delta as the authoritative average
-//     power over the interval.
-//   - If the counter was flat, fall back to the instantaneous power reading
-//     (pacToUserTotal / pacToGridTotal) clamped to the quantization ceiling:
-//     if the counter did not tick, the true average power must have been
-//     below 0.1 kWh per interval — anything higher is a spurious API spike.
+// deriveGridPower computes grid import/export watts for each sample.
 //
-// This keeps resolution for small grid flows that sit below the counter's
-// 0.1 kWh tick (e.g. trickle import at night when sampling is sparse) while
-// suppressing the 6 kW+ bogus spikes we have observed from the API.
+// The shape of the series comes from the inverter's energy balance:
 //
-// The first sample has no prior sample to diff against and is left at 0.
-// Negative deltas (counter reset at midnight, cross-day queries) fall back
-// to the same clamped-instantaneous path.
+//	net = load + charge - pv - discharge
+//
+// with net > 0 meaning import and net < 0 meaning export. The balance uses
+// only the instantaneous channels, which have 1 W resolution at every
+// sample, and it stays correct in the cases where the API's own grid power
+// fields (pacToUserTotal / pacToGridTotal) read zero although the load was
+// plainly being fed from the grid. In real data those fields under-reported
+// import by ~2 kWh on a day the balance was within 0.2 kWh of the counter.
+//
+// The daily energy counters (etoUserToday / etoGridToday) are then used to
+// pin the integral: within each counter-aligned window the shape is scaled
+// so that its trapezoidal integral lands within one counter quantum of the
+// counter delta, preferring no scaling at all. This removes energy the
+// samples missed (brief export bursts on a cloudy day), suppresses phantom
+// flows the counter says never happened, and keeps daily totals consistent
+// with the inverter without ever dividing a quantised counter by a short
+// interval, which is what produced the +-1.2 kW sawtooth before.
 func deriveGridPower(points []growatt.TimeSeriesPoint) (gridIn, gridOut []float64) {
-	gridIn = make([]float64, len(points))
-	gridOut = make([]float64, len(points))
-	for i := 1; i < len(points); i++ {
-		hours := points[i].Time.Sub(points[i-1].Time).Hours()
-		if hours <= 0 {
-			continue
+	n := len(points)
+	times := make([]time.Time, n)
+	impShape := make([]float64, n)
+	expShape := make([]float64, n)
+	impCounter := make([]float64, n)
+	expCounter := make([]float64, n)
+	for i, p := range points {
+		times[i] = p.Time
+		net := p.LoadPower + p.ChargePower - p.PPVTotal - p.DischargePower
+		if net > 0 {
+			impShape[i] = net
+		} else {
+			expShape[i] = -net
 		}
-		ceilingW := counterQuantumKWh * 1000.0 / hours
-		gridIn[i] = hybridPower(
-			points[i].GridImportToday-points[i-1].GridImportToday,
-			points[i].GridImportPower,
-			hours, ceilingW)
-		gridOut[i] = hybridPower(
-			points[i].GridExportToday-points[i-1].GridExportToday,
-			points[i].GridExportPower,
-			hours, ceilingW)
+		impCounter[i] = p.GridImportToday
+		expCounter[i] = p.GridExportToday
 	}
+	gridIn = reconcileToCounter(times, impShape, impCounter)
+	gridOut = reconcileToCounter(times, expShape, expCounter)
 	return gridIn, gridOut
 }
 
@@ -380,20 +387,98 @@ func deriveGridPower(points []growatt.TimeSeriesPoint) (gridIn, gridOut []float6
 // counters (etoUserToday / etoGridToday).
 const counterQuantumKWh = 0.1
 
-// hybridPower returns the best estimate of average watts for an interval:
-// prefer the cumulative-counter delta, otherwise the instantaneous reading
-// clamped to a physical ceiling derived from the counter quantum.
-func hybridPower(deltaKWh, instantW, hours, ceilingW float64) float64 {
-	if deltaKWh > 0 {
-		return deltaKWh * 1000.0 / hours
+// reconcileWindow is the minimum span of a reconciliation window. Windows
+// always start and end on a counter tick, so a longer window carries more
+// ticks and the +-1 quantum uncertainty matters less.
+const reconcileWindow = 30 * time.Minute
+
+// reconcileToCounter scales a power shape (watts per sample) so that within
+// each window its trapezoidal integral agrees with the cumulative counter
+// (kWh) to within one quantum. A window runs from one counter tick to the
+// next tick at least reconcileWindow later; the first window starts at the
+// first sample and the last one ends at the last sample regardless.
+//
+// Per window, with delta = counter change and integral = shape energy:
+//   - integral already within delta +- quantum: shape kept as is.
+//   - otherwise: shape scaled to the nearest edge of that band.
+//   - shape is zero but the counter moved by more than a quantum: the
+//     energy is spread flat across the window.
+//   - counter went backwards (reset): shape kept as is.
+func reconcileToCounter(times []time.Time, shape, counter []float64) []float64 {
+	n := len(times)
+	out := make([]float64, n)
+	if n == 0 {
+		return out
 	}
-	if instantW < 0 {
-		return 0
+	if n == 1 {
+		out[0] = shape[0]
+		return out
 	}
-	if instantW > ceilingW {
-		return ceilingW
+
+	bounds := []int{0}
+	for i := 1; i < n; i++ {
+		reset := counter[i] < counter[i-1]
+		ticked := counter[i] != counter[i-1]
+		longEnough := times[i].Sub(times[bounds[len(bounds)-1]]) >= reconcileWindow
+		if reset || (ticked && longEnough) {
+			bounds = append(bounds, i)
+		}
 	}
-	return instantW
+	if bounds[len(bounds)-1] != n-1 {
+		bounds = append(bounds, n-1)
+	}
+
+	for w := 0; w+1 < len(bounds); w++ {
+		a, b := bounds[w], bounds[w+1]
+		last := b+1 == n // final window also owns the last sample
+		delta := counter[b] - counter[a]
+		hours := times[b].Sub(times[a]).Hours()
+		integral := trapezoidKWh(times[a:b+1], shape[a:b+1])
+
+		scale := 1.0
+		flat := false
+		switch {
+		case delta < 0 || hours <= 0:
+			// Counter reset inside the window; nothing to reconcile against.
+		case integral <= 0:
+			// More than a single tick (with slack for float noise on the
+			// 0.1 kWh steps) is real energy the shape missed entirely.
+			flat = delta > counterQuantumKWh*1.5
+		default:
+			lo := (delta - counterQuantumKWh) / integral
+			hi := (delta + counterQuantumKWh) / integral
+			scale = math.Min(math.Max(1, lo), hi)
+			if scale < 0 {
+				scale = 0
+			}
+		}
+
+		end := b
+		if last {
+			end = n
+		}
+		for i := a; i < end; i++ {
+			if flat {
+				out[i] = delta * 1000 / hours
+			} else {
+				out[i] = shape[i] * scale
+			}
+		}
+	}
+	return out
+}
+
+// trapezoidKWh integrates a watt series over its timestamps into kWh.
+func trapezoidKWh(times []time.Time, watts []float64) float64 {
+	var kwh float64
+	for i := 1; i < len(times); i++ {
+		h := times[i].Sub(times[i-1]).Hours()
+		if h <= 0 {
+			continue
+		}
+		kwh += (watts[i-1] + watts[i]) / 2 * h / 1000
+	}
+	return kwh
 }
 
 // SetTariffConfig sets the tariff configuration for cost calculations.

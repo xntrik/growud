@@ -281,7 +281,7 @@ type TimeSeriesPoint struct {
 	SOC             float64
 	ChargePower     float64
 	DischargePower  float64
-	GridImportPower float64 // instantaneous watts (pacToUserTotal); unreliable — spurious spikes
+	GridImportPower float64 // instantaneous watts (pacToUserTotal); unreliable — reads 0 during real import at times
 	GridExportPower float64 // instantaneous watts (pacToGridTotal)
 	GridImportToday float64 // cumulative kWh (etoUserToday), resets at midnight
 	GridExportToday float64 // cumulative kWh (etoGridToday), resets at midnight

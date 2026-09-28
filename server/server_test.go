@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -239,53 +241,18 @@ func TestHandleAPIReadings_WithData(t *testing.T) {
 func TestHandleAPIReadings_DerivedGridPower(t *testing.T) {
 	srv := newTestServerWithAPI(t, func(w http.ResponseWriter, r *http.Request) {})
 
-	// Samples 5 minutes apart. Counter quantum is 0.1 kWh, so the ceiling
-	// for a 5-min interval is 0.1 * 1000 / (5/60) = 1200 W.
+	// Night-time samples 5 minutes apart at a steady ~7 kW load fed from
+	// the grid, mirroring real data. The counter advances 0.5 or 0.6 kWh
+	// per sample because of its 0.1 kWh resolution; the chart must not
+	// turn that into a 6.0/7.2 kW sawtooth.
 	datas := []map[string]any{
-		{
-			// Baseline.
-			"time":           "2026-03-27 10:00:00",
-			"etoUserToday":   float64(0.0),
-			"etoGridToday":   float64(1.0),
-			"pacToUserTotal": float64(0),
-			"pacToGridTotal": float64(2000),
-		},
-		{
-			// Counter ticks; instantaneous has a spurious 6 kW spike. Use
-			// the counter delta: 0.1 kWh over 5 min = 1200 W.
-			"time":           "2026-03-27 10:05:00",
-			"etoUserToday":   float64(0.1),
-			"etoGridToday":   float64(1.2),
-			"pacToUserTotal": float64(6000),
-			"pacToGridTotal": float64(2500),
-		},
-		{
-			// Import counter flat, instantaneous zero → 0 W.
-			// Export counter ticks by 0.2 kWh → 2400 W.
-			"time":           "2026-03-27 10:10:00",
-			"etoUserToday":   float64(0.1),
-			"etoGridToday":   float64(1.4),
-			"pacToUserTotal": float64(0),
-			"pacToGridTotal": float64(2600),
-		},
-		{
-			// Both counters flat; small instantaneous import preserved
-			// (below ceiling) and zero export → 0 W.
-			"time":           "2026-03-27 10:15:00",
-			"etoUserToday":   float64(0.1),
-			"etoGridToday":   float64(1.4),
-			"pacToUserTotal": float64(500),
-			"pacToGridTotal": float64(0),
-		},
-		{
-			// Both counters flat; instantaneous spike clamped to the 1200 W
-			// ceiling since sustained >1200 W would have ticked the counter.
-			"time":           "2026-03-27 10:20:00",
-			"etoUserToday":   float64(0.1),
-			"etoGridToday":   float64(1.4),
-			"pacToUserTotal": float64(9000),
-			"pacToGridTotal": float64(0),
-		},
+		{"time": "2026-03-27 01:00:00", "pacToUserTotal": float64(6980), "plocalLoadTotal": float64(6980), "etoUserToday": float64(0.2), "etoGridToday": float64(0)},
+		{"time": "2026-03-27 01:05:00", "pacToUserTotal": float64(6980), "plocalLoadTotal": float64(6980), "etoUserToday": float64(0.8), "etoGridToday": float64(0)},
+		{"time": "2026-03-27 01:10:00", "pacToUserTotal": float64(6970), "plocalLoadTotal": float64(6970), "etoUserToday": float64(1.4), "etoGridToday": float64(0)},
+		{"time": "2026-03-27 01:15:00", "pacToUserTotal": float64(7020), "plocalLoadTotal": float64(7020), "etoUserToday": float64(2.0), "etoGridToday": float64(0)},
+		{"time": "2026-03-27 01:20:00", "pacToUserTotal": float64(7070), "plocalLoadTotal": float64(7070), "etoUserToday": float64(2.5), "etoGridToday": float64(0)},
+		{"time": "2026-03-27 01:25:00", "pacToUserTotal": float64(7040), "plocalLoadTotal": float64(7040), "etoUserToday": float64(3.1), "etoGridToday": float64(0)},
+		{"time": "2026-03-27 01:30:00", "pacToUserTotal": float64(6980), "plocalLoadTotal": float64(6980), "etoUserToday": float64(3.7), "etoGridToday": float64(0)},
 	}
 	if _, _, err := srv.store.UpsertReadings("SN001", 5, datas); err != nil {
 		t.Fatal(err)
@@ -299,30 +266,149 @@ func TestHandleAPIReadings_DerivedGridPower(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Readings) != 5 {
-		t.Fatalf("got %d readings, want 5", len(resp.Readings))
+	if len(resp.Readings) != len(datas) {
+		t.Fatalf("got %d readings, want %d", len(resp.Readings), len(datas))
+	}
+	for i, r := range resp.Readings {
+		want := datas[i]["plocalLoadTotal"].(float64)
+		if r.GridIn < want-1 || r.GridIn > want+1 {
+			t.Errorf("sample %d: GridIn=%f, want %f (flat plateau, no sawtooth)", i, r.GridIn, want)
+		}
+		if r.GridOut != 0 {
+			t.Errorf("sample %d: GridOut=%f, want 0", i, r.GridOut)
+		}
+	}
+}
+
+func gridPoint(hhmm string, pv, load, charge, discharge, impToday, expToday float64) growatt.TimeSeriesPoint {
+	tm, err := time.Parse("2006-01-02 15:04", "2026-03-27 "+hhmm)
+	if err != nil {
+		panic(err)
+	}
+	return growatt.TimeSeriesPoint{
+		Time: tm, PPVTotal: pv, LoadPower: load, ChargePower: charge, DischargePower: discharge,
+		GridImportToday: impToday, GridExportToday: expToday,
+	}
+}
+
+func integrateKWh(points []growatt.TimeSeriesPoint, watts []float64) float64 {
+	times := make([]time.Time, len(points))
+	for i, p := range points {
+		times[i] = p.Time
+	}
+	return trapezoidKWh(times, watts)
+}
+
+func TestDeriveGridPower_BalanceBeatsZeroedAPIField(t *testing.T) {
+	// The API's pacToUserTotal reads 0 while the battery is capped at
+	// 5 kW and the load is above it. The energy balance still shows the
+	// import, and the counter confirms it. Import over the window should
+	// follow load - discharge, not zero.
+	var pts []growatt.TimeSeriesPoint
+	for i := 0; i < 8; i++ {
+		// 1 kW of real import = 0.0833 kWh per 5-min sample; the 0.1 kWh
+		// counter lags behind and catches up, as the device's does.
+		counter := 2.0 + math.Floor(float64(i)*5.0/60.0*10+1e-9)/10
+		pts = append(pts, gridPoint(fmt.Sprintf("19:%02d", i*5), 0, 6000, 0, 5000, counter, 2.6))
+	}
+	gridIn, gridOut := deriveGridPower(pts)
+	for i, v := range gridIn {
+		if v < 900 || v > 1100 {
+			t.Errorf("sample %d: GridIn=%f, want ~1000 from balance", i, v)
+		}
+		if gridOut[i] != 0 {
+			t.Errorf("sample %d: GridOut=%f, want 0", i, gridOut[i])
+		}
+	}
+}
+
+func TestDeriveGridPower_PhantomFlowSuppressedByFlatCounter(t *testing.T) {
+	// Battery charging at 5 kW from PV for two hours; inverter losses make
+	// the balance show ~300 W of "import" that the counter never records.
+	// Over 2 h that is 0.6 kWh, so it must be scaled down to at most one
+	// quantum (0.1 kWh).
+	var pts []growatt.TimeSeriesPoint
+	for i := 0; i < 25; i++ {
+		pts = append(pts, gridPoint(fmt.Sprintf("%02d:%02d", 10+i/12, (i%12)*5), 5000, 800, 4500, 0, 1.0, 0.1))
+	}
+	gridIn, _ := deriveGridPower(pts)
+	if kwh := integrateKWh(pts, gridIn); kwh > counterQuantumKWh+1e-9 {
+		t.Errorf("phantom import integrates to %.3f kWh, want <= %.1f", kwh, counterQuantumKWh)
+	}
+	for i, v := range gridIn {
+		if v < 0 || v > 300 {
+			t.Errorf("sample %d: GridIn=%f, want scaled-down phantom in [0,300]", i, v)
+		}
+	}
+}
+
+func TestDeriveGridPower_MissedBurstsPulledUpToCounter(t *testing.T) {
+	// Cloudy day: export happens in bursts between samples. The sampled
+	// balance only sees a little export, but the counter moved 0.8 kWh in
+	// 30 minutes. The series must be scaled up so its integral lands
+	// within one quantum of the counter.
+	pts := []growatt.TimeSeriesPoint{
+		gridPoint("13:50", 2770, 750, 1150, 0, 1.1, 1.8),
+		gridPoint("13:55", 6280, 3160, 1150, 0, 1.1, 1.9),
+		gridPoint("14:00", 5350, 3100, 1150, 0, 1.1, 2.0),
+		gridPoint("14:05", 5730, 3090, 680, 0, 1.1, 2.1),
+		gridPoint("14:10", 3020, 3070, 0, 240, 1.1, 2.2),
+		gridPoint("14:15", 1940, 2890, 0, 950, 1.1, 2.3),
+		gridPoint("14:20", 1560, 2860, 0, 1300, 1.1, 2.6),
+	}
+	_, gridOut := deriveGridPower(pts)
+	shape := make([]float64, len(pts))
+	for i, p := range pts {
+		if net := p.PPVTotal + p.DischargePower - p.ChargePower - p.LoadPower; net > 0 {
+			shape[i] = net
+		}
+	}
+	raw := integrateKWh(pts, shape)
+	got := integrateKWh(pts, gridOut)
+	want := 0.8
+	if got <= raw {
+		t.Fatalf("reconciled export %.3f kWh should exceed raw %.3f kWh", got, raw)
+	}
+	if got < want-counterQuantumKWh-0.02 || got > want+counterQuantumKWh+0.02 {
+		t.Errorf("reconciled export = %.3f kWh, want within one quantum of %.1f", got, want)
+	}
+}
+
+func TestDeriveGridPower_FlatFillWhenShapeIsZero(t *testing.T) {
+	// Every instantaneous channel reads zero but the counter moved by more
+	// than one quantum: spread the energy flat rather than drop it.
+	pts := []growatt.TimeSeriesPoint{
+		gridPoint("02:00", 0, 0, 0, 0, 1.0, 0),
+		gridPoint("02:15", 0, 0, 0, 0, 1.0, 0),
+		gridPoint("02:30", 0, 0, 0, 0, 1.3, 0),
+	}
+	gridIn, _ := deriveGridPower(pts)
+	// 0.3 kWh over 30 min = 600 W.
+	for i, v := range gridIn {
+		if v < 599 || v > 601 {
+			t.Errorf("sample %d: GridIn=%f, want 600 flat fill", i, v)
+		}
 	}
 
-	near := func(got, want, tol float64) bool { return got >= want-tol && got <= want+tol }
-	cases := []struct {
-		i                    int
-		wantIn, wantOut, tol float64
-		note                 string
-	}{
-		{0, 0, 0, 0, "first sample has no prior, left at 0"},
-		{1, 1200, 2400, 1, "counter delta path ignores 6 kW spike"},
-		{2, 0, 2400, 1, "import flat → 0; export counter ticks"},
-		{3, 500, 0, 0, "flat counter + small instantaneous preserved"},
-		{4, 1200, 0, 0, "flat counter + big instantaneous clamped to ceiling"},
+	// A single-quantum tick with no shape is within tolerance of zero and
+	// is not invented.
+	pts[2].GridImportToday = 1.1
+	gridIn, _ = deriveGridPower(pts)
+	for i, v := range gridIn {
+		if v != 0 {
+			t.Errorf("sample %d: GridIn=%f, want 0 for a lone tick", i, v)
+		}
 	}
-	for _, c := range cases {
-		r := resp.Readings[c.i]
-		if !near(r.GridIn, c.wantIn, c.tol) {
-			t.Errorf("sample %d (%s): GridIn=%f, want %f", c.i, c.note, r.GridIn, c.wantIn)
-		}
-		if !near(r.GridOut, c.wantOut, c.tol) {
-			t.Errorf("sample %d (%s): GridOut=%f, want %f", c.i, c.note, r.GridOut, c.wantOut)
-		}
+}
+
+func TestDeriveGridPower_Degenerate(t *testing.T) {
+	if in, out := deriveGridPower(nil); len(in) != 0 || len(out) != 0 {
+		t.Errorf("nil input: got %v %v", in, out)
+	}
+	one := []growatt.TimeSeriesPoint{gridPoint("12:00", 1000, 3000, 0, 0, 5, 1)}
+	in, out := deriveGridPower(one)
+	if len(in) != 1 || in[0] != 2000 || out[0] != 0 {
+		t.Errorf("single point: got in=%v out=%v, want in=[2000] out=[0]", in, out)
 	}
 }
 
