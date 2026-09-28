@@ -147,6 +147,7 @@ const dashboardHTML = `<!DOCTYPE html>
             });
             var kwh = 0;
             for (var j = 1; j < pts.length; j++) {
+                if (pts[j-1].y === null || pts[j].y === null) continue;
                 var dt = (new Date(pts[j].x).getTime() - new Date(pts[j-1].x).getTime()) / 3600000;
                 kwh += (pts[j-1].y + pts[j].y) / 2 * dt / 1000;
             }
@@ -216,13 +217,29 @@ const dashboardHTML = `<!DOCTYPE html>
 
             const readings = data.readings || [];
 
+            // Break the line where the logger missed samples, instead of
+            // drawing a straight line across the hole.
+            const GAP_MS = 20 * 60 * 1000;
+            function series(key) {
+                const pts = [];
+                for (let i = 0; i < readings.length; i++) {
+                    if (i > 0) {
+                        const prev = new Date(readings[i-1].time).getTime();
+                        const cur = new Date(readings[i].time).getTime();
+                        if (cur - prev > GAP_MS) pts.push({x: new Date((prev + cur) / 2).toISOString(), y: null});
+                    }
+                    pts.push({x: readings[i].time, y: readings[i][key]});
+                }
+                return pts;
+            }
+
             const datasets = [
-                { label: 'Solar PV', data: readings.map(r => ({x: r.time, y: r.solar})), borderColor: chartColors.solar, backgroundColor: 'rgba(74, 222, 128, 0.1)', fill: true, tension: 0.3, pointRadius: 0 },
-                { label: 'Load', data: readings.map(r => ({x: r.time, y: r.load})), borderColor: chartColors.load, backgroundColor: 'rgba(248, 113, 113, 0.1)', fill: true, tension: 0.3, pointRadius: 0 },
-                { label: 'Discharge', data: readings.map(r => ({x: r.time, y: r.discharge})), borderColor: chartColors.discharge, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
-                { label: 'Charge', data: readings.map(r => ({x: r.time, y: r.charge})), borderColor: chartColors.charge, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
-                { label: 'Grid Import', data: readings.map(r => ({x: r.time, y: r.grid_in})), borderColor: chartColors.gridIn, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
-                { label: 'Grid Export', data: readings.map(r => ({x: r.time, y: r.grid_out})), borderColor: chartColors.gridOut, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
+                { label: 'Solar PV', data: series('solar'), borderColor: chartColors.solar, backgroundColor: 'rgba(74, 222, 128, 0.1)', fill: true, cubicInterpolationMode: 'monotone', spanGaps: false, pointRadius: 0 },
+                { label: 'Load', data: series('load'), borderColor: chartColors.load, backgroundColor: 'rgba(248, 113, 113, 0.1)', fill: true, cubicInterpolationMode: 'monotone', spanGaps: false, pointRadius: 0 },
+                { label: 'Discharge', data: series('discharge'), borderColor: chartColors.discharge, backgroundColor: 'transparent', cubicInterpolationMode: 'monotone', spanGaps: false, pointRadius: 0 },
+                { label: 'Charge', data: series('charge'), borderColor: chartColors.charge, backgroundColor: 'transparent', cubicInterpolationMode: 'monotone', spanGaps: false, pointRadius: 0 },
+                { label: 'Grid Import', data: series('grid_in'), borderColor: chartColors.gridIn, backgroundColor: 'transparent', cubicInterpolationMode: 'monotone', spanGaps: false, pointRadius: 0 },
+                { label: 'Grid Export', data: series('grid_out'), borderColor: chartColors.gridOut, backgroundColor: 'transparent', cubicInterpolationMode: 'monotone', spanGaps: false, pointRadius: 0 },
             ];
 
             if (chart) {
